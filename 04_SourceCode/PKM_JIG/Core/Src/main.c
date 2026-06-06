@@ -20,11 +20,13 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
-#include "usbd_cdc_if.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "usbd_cdc_if.h"
 #include "CLCD.h"
 #include "string.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -34,6 +36,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* Voltage divider: R55=20K (top), R58=2K (bottom) → VBAT = VIN_MCU × 11 */
+#define VBAT_DIVIDER_RATIO   11UL
+/* ACS712 5A: sensitivity=185mV/A, zero-current offset=2500mV */
+#define ACS712_SENSITIVITY   185L   /* mV per Ampere */
+#define ACS712_OFFSET_MV    2500L   /* mV at zero current */
+/* ADC reference and resolution */
+#define ADC_VREF_MV         5000UL
+#define ADC_RESOLUTION      4095UL
+/* ADC display update period (ms) */
+#define ADC_UPDATE_PERIOD_MS  500U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -42,6 +54,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+
 TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
@@ -52,8 +66,7 @@ SETTING_STATE enl_setting_state;    /* System state: SETTING or RUNNING */
 uint8_t u1l_LCD_pos_Vol[3][2] =
 {
   { 1U, 1U},
-  { 1U, 2U},
-  { 1U, 3U}
+  { 1U, 2U}
 };
 
 /* Postion of option on LCD (x,y)*/
@@ -78,6 +91,7 @@ uint8_t Is_app_status;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 void clear_LCD_pos(void);
 void f_display_voltage(void);
@@ -86,7 +100,6 @@ void f_clr_pos_lcd(uint8_t u1l_LCD_pos[][2]);
 void f_pos_lcd(uint8_t u1l_LCD_pos[][2] ,uint8_t row);
 void f_voltage_0V(void);
 void f_voltage_12V(void);
-void f_voltage_24V(void);
 void f_active_sw(void);
 void f_deactive_sw(void);
 void f_active_ST(void);
@@ -94,6 +107,8 @@ void f_active_BLE(void);
 void f_active_UWB(void);
 void f_sw_signal_not_use(void);
 uint8_t f_display_app(void);
+static uint16_t f_read_adc_ch(uint32_t channel);
+void f_update_adc_display(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -195,13 +210,13 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM3_Init();
   MX_USB_DEVICE_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   /* ADJ for LCD */
   HAL_TIM_PWM_Start(&htim3,TIM_CHANNEL_2);
   __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_2, 50);
 
   /* Enable LCD */
-  HAL_GPIO_WritePin(LCD_LED_GPIO_Port, LCD_LED_Pin, GPIO_PIN_SET);
 
   /* Init LCD */
   CLCD_4BIT_Init(&LCD1, 20, 4, LCD_RS_GPIO_Port, LCD_RS_Pin, LCD_EN_GPIO_Port, LCD_EN_Pin,
@@ -233,6 +248,15 @@ int main(void)
       {
         /* State Voltage*/
         case EN_VOLTAGE:
+          /* Continuous voltage and current update every ADC_UPDATE_PERIOD_MS */
+          {
+            static uint32_t u4l_last_adc_tick = 0U;
+            if ((HAL_GetTick() - u4l_last_adc_tick) >= ADC_UPDATE_PERIOD_MS)
+            {
+              u4l_last_adc_tick = HAL_GetTick();
+              f_update_adc_display();
+            }
+          }
           /* Select voltage by BTN3 */
           if (HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0)
           {
@@ -241,7 +265,7 @@ int main(void)
               {
                   /* Control pointer select voltage option */
                   u1l_LCD_pos_cur++;
-                  if (u1l_LCD_pos_cur > 2)
+                  if (u1l_LCD_pos_cur > 1)
                   {
                     u1l_LCD_pos_cur = 0;
                   }
@@ -259,9 +283,6 @@ int main(void)
                       break;
                     case 1:
                       f_voltage_12V();
-                      break;
-                    case 2:
-                      f_voltage_24V();
                       break;
                   }
                   while(HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0);
@@ -382,15 +403,6 @@ int main(void)
               App_Voltage = EN_VOL_DEFAULT;
               break;
 
-            case EN_24V:
-              f_voltage_24V();
-              CLCD_SetCursor(&LCD1, 9, 1);
-              CLCD_WriteString(&LCD1,"   ");
-              CLCD_SetCursor(&LCD1, 9, 1);
-              CLCD_WriteString(&LCD1,"24V");
-              App_Voltage = EN_VOL_DEFAULT;
-              break;
-
             default:
               /*do nothing */
               break;
@@ -488,12 +500,58 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC|RCC_PERIPHCLK_USB;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
   PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_PLL_DIV1_5;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+  /** Common config
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 1;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -553,72 +611,60 @@ static void MX_TIM3_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-/* USER CODE BEGIN MX_GPIO_Init_1 */
-/* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LCD_LED_Pin|LCD_D7_Pin|LCD_D6_Pin|LCD_D5_Pin
-                          |LCD_D4_Pin|LCD_EN_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LCD_D7_Pin|LCD_D6_Pin|LCD_D5_Pin|LCD_D4_Pin
+                          |LCD_EN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LCD_RS_Pin|JTAG_EN_n_Pin|JTAG_S0_Pin|JTAG_S1_Pin
-                          |EN_24V_n_Pin|EN_12V_n_Pin, GPIO_PIN_RESET);
+                          |ST_Prog_Ctrl_Pin|BLE_Prog_Ctrl_Pin|UWB_Prog_Ctrl_Pin|EN_24V_n_Pin
+                          |EN_12V_n_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PC14 PC15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LCD_LED_Pin LCD_D7_Pin LCD_D6_Pin LCD_D5_Pin
-                           LCD_D4_Pin LCD_EN_Pin */
-  GPIO_InitStruct.Pin = LCD_LED_Pin|LCD_D7_Pin|LCD_D6_Pin|LCD_D5_Pin
-                          |LCD_D4_Pin|LCD_EN_Pin;
+  /*Configure GPIO pins : LCD_D7_Pin LCD_D6_Pin LCD_D5_Pin LCD_D4_Pin
+                           LCD_EN_Pin */
+  GPIO_InitStruct.Pin = LCD_D7_Pin|LCD_D6_Pin|LCD_D5_Pin|LCD_D4_Pin
+                          |LCD_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LCD_RS_Pin JTAG_EN_n_Pin JTAG_S0_Pin JTAG_S1_Pin
-                           EN_24V_n_Pin EN_12V_n_Pin */
+                           ST_Prog_Ctrl_Pin BLE_Prog_Ctrl_Pin UWB_Prog_Ctrl_Pin EN_24V_n_Pin
+                           EN_12V_n_Pin */
   GPIO_InitStruct.Pin = LCD_RS_Pin|JTAG_EN_n_Pin|JTAG_S0_Pin|JTAG_S1_Pin
-                          |EN_24V_n_Pin|EN_12V_n_Pin;
+                          |ST_Prog_Ctrl_Pin|BLE_Prog_Ctrl_Pin|UWB_Prog_Ctrl_Pin|EN_24V_n_Pin
+                          |EN_12V_n_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BTN1_Pin BTN2_Pin BTN3_Pin */
-  GPIO_InitStruct.Pin = BTN1_Pin|BTN2_Pin|BTN3_Pin;
+  /*Configure GPIO pins : BTN3_Pin BTN2_Pin BTN1_Pin */
+  GPIO_InitStruct.Pin = BTN3_Pin|BTN2_Pin|BTN1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-/* USER CODE BEGIN MX_GPIO_Init_2 */
-/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 void f_display_voltage(void)
 {
   CLCD_SetCursor(&LCD1, 0, 0);
-  CLCD_WriteString(&LCD1,"Select Voltage");
+  CLCD_WriteString(&LCD1,"Power enable");
   CLCD_SetCursor(&LCD1, 3, 1);
-  CLCD_WriteString(&LCD1,"0V");
+  CLCD_WriteString(&LCD1,"OFF");
   CLCD_SetCursor(&LCD1, 3, 2);
-  CLCD_WriteString(&LCD1,"12V");
-  CLCD_SetCursor(&LCD1, 3, 3);
-  CLCD_WriteString(&LCD1,"24V");
+  CLCD_WriteString(&LCD1,"ON");
+  CLCD_SetCursor(&LCD1, 0, 3);
+  CLCD_WriteString(&LCD1,"Vol:      Cur:    ");
   f_pos_lcd(u1l_LCD_pos_Vol, 0);
 }
 void f_display_sw_signal(void)
@@ -680,34 +726,13 @@ void f_pos_lcd(uint8_t u1l_LCD_pos[][2],uint8_t row)
 
 void f_voltage_0V(void)
 {
-		HAL_GPIO_WritePin (GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
-		HAL_GPIO_WritePin (GPIOC, GPIO_PIN_15, GPIO_PIN_RESET);
-		HAL_Delay(1000);
     HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(EN_24V_n_GPIO_Port, EN_24V_n_Pin, GPIO_PIN_RESET);
-		HAL_Delay(5000);
 }
 
 void f_voltage_12V(void)
 {
-		HAL_GPIO_WritePin (GPIOC, GPIO_PIN_14, GPIO_PIN_RESET); /* PIN RL 24 */
-		HAL_Delay(1000);
-		HAL_GPIO_WritePin (GPIOC, GPIO_PIN_15, GPIO_PIN_SET);		/* PIN RL 12 */
-		HAL_Delay(1000);
-	
     HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(EN_24V_n_GPIO_Port, EN_24V_n_Pin, GPIO_PIN_RESET);
-}
-
-void f_voltage_24V(void)
-{
-		HAL_GPIO_WritePin (GPIOC, GPIO_PIN_15, GPIO_PIN_RESET); /* PIN RL 12 */
-		HAL_Delay(1000);
-		HAL_GPIO_WritePin (GPIOC, GPIO_PIN_14, GPIO_PIN_SET);		/* PIN RL 24 */
-		HAL_Delay(1000);
-	
-    HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(EN_24V_n_GPIO_Port, EN_24V_n_Pin, GPIO_PIN_SET);
 }
 
 void f_active_sw(void)
@@ -745,6 +770,60 @@ void f_sw_signal_not_use(void)
 {
     HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, GPIO_PIN_SET);
+}
+
+/**
+ * @brief  Switch ADC channel, perform one conversion and return raw value.
+ */
+static uint16_t f_read_adc_ch(uint32_t channel)
+{
+    ADC_ChannelConfTypeDef sConfig = {0};
+    sConfig.Channel      = channel;
+    sConfig.Rank         = ADC_REGULAR_RANK_1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 10U);
+    uint16_t val = (uint16_t)HAL_ADC_GetValue(&hadc1);
+    HAL_ADC_Stop(&hadc1);
+    return val;
+}
+
+/**
+ * @brief  Read VIN_MCU (CH0) and IIN_MCU (CH1), convert to real values
+ *         and update row 3 of LCD: "Vol: XXV  Cur: X.XA"
+ *
+ * Voltage: VBAT = VIN_MCU × (R55+R58)/R58 = VIN_MCU × 11
+ * Current: I = (Vout - 2500mV) / 185mV  (ACS712 5A)
+ */
+void f_update_adc_display(void)
+{
+    char buf[8];
+
+    /* --- Voltage --- */
+    uint16_t adc_vin = f_read_adc_ch(ADC_CHANNEL_0);
+    /* VBAT_mV = adc × Vref × divider_ratio / ADC_max */
+    /* VBAT in tenths of volt: e.g. 211 → "21.1V" */
+    uint32_t vbat_tenths = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 100U;
+
+    /* Update voltage at col 4, row 3 → "21.1V" (5 chars) */
+    CLCD_SetCursor(&LCD1, 4, 3);
+    sprintf(buf, "%2d.%1dV", (int)(vbat_tenths / 10U), (int)(vbat_tenths % 10U));
+    CLCD_WriteString(&LCD1, buf);
+
+    /* --- Current (ACS712) --- */
+    uint16_t adc_iin = f_read_adc_ch(ADC_CHANNEL_1);
+    int32_t  vout_mv = (int32_t)((uint32_t)adc_iin * ADC_VREF_MV / ADC_RESOLUTION);
+    int32_t  i_ma    = (vout_mv - ACS712_OFFSET_MV) * 1000L / ACS712_SENSITIVITY;
+    if (i_ma < 0) { i_ma = 0; }
+
+    /* Current in tenths of Ampere: e.g. 12 → "1.2A" */
+    uint32_t i_tenths = (uint32_t)i_ma / 100U;
+
+    /* Update current at col 14, row 3 → " 1.2A" (5 chars) */
+    CLCD_SetCursor(&LCD1, 14, 3);
+    sprintf(buf, "%2d.%1dA", (int)(i_tenths / 10U), (int)(i_tenths % 10U));
+    CLCD_WriteString(&LCD1, buf);
 }
 
 /* USER CODE END 4 */

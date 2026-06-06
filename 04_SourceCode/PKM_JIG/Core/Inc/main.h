@@ -60,8 +60,6 @@ void USBRxHandler(uint8_t* buf, uint32_t len);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define LCD_LED_Pin GPIO_PIN_1
-#define LCD_LED_GPIO_Port GPIOA
 #define LCD_D7_Pin GPIO_PIN_2
 #define LCD_D7_GPIO_Port GPIOA
 #define LCD_D6_Pin GPIO_PIN_3
@@ -80,19 +78,22 @@ void USBRxHandler(uint8_t* buf, uint32_t len);
 #define JTAG_S0_GPIO_Port GPIOB
 #define JTAG_S1_Pin GPIO_PIN_15
 #define JTAG_S1_GPIO_Port GPIOB
-#define BTN1_Pin GPIO_PIN_8
-#define BTN1_GPIO_Port GPIOA
+#define BTN3_Pin GPIO_PIN_8
+#define BTN3_GPIO_Port GPIOA
 #define BTN2_Pin GPIO_PIN_9
 #define BTN2_GPIO_Port GPIOA
-#define BTN3_Pin GPIO_PIN_10
-#define BTN3_GPIO_Port GPIOA
+#define BTN1_Pin GPIO_PIN_10
+#define BTN1_GPIO_Port GPIOA
+#define ST_Prog_Ctrl_Pin GPIO_PIN_3
+#define ST_Prog_Ctrl_GPIO_Port GPIOB
+#define BLE_Prog_Ctrl_Pin GPIO_PIN_4
+#define BLE_Prog_Ctrl_GPIO_Port GPIOB
+#define UWB_Prog_Ctrl_Pin GPIO_PIN_5
+#define UWB_Prog_Ctrl_GPIO_Port GPIOB
 #define EN_24V_n_Pin GPIO_PIN_6
 #define EN_24V_n_GPIO_Port GPIOB
 #define EN_12V_n_Pin GPIO_PIN_7
 #define EN_12V_n_GPIO_Port GPIOB
-
-#define LED_BLICK_PIN 	GPIO_PIN_13
-#define LED_BLICK_PORT 	GPIOC
 /* USER CODE BEGIN Private defines */
 
 #define E_OK 			0U

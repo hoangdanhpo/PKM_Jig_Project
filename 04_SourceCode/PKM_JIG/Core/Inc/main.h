@@ -78,12 +78,12 @@ void USBRxHandler(uint8_t* buf, uint32_t len);
 #define JTAG_S0_GPIO_Port GPIOB
 #define JTAG_S1_Pin GPIO_PIN_15
 #define JTAG_S1_GPIO_Port GPIOB
-#define BTN3_Pin GPIO_PIN_8
-#define BTN3_GPIO_Port GPIOA
+#define BTN1_Pin GPIO_PIN_8
+#define BTN1_GPIO_Port GPIOA
 #define BTN2_Pin GPIO_PIN_9
 #define BTN2_GPIO_Port GPIOA
-#define BTN1_Pin GPIO_PIN_10
-#define BTN1_GPIO_Port GPIOA
+#define BTN3_Pin GPIO_PIN_10
+#define BTN3_GPIO_Port GPIOA
 #define ST_Prog_Ctrl_Pin GPIO_PIN_3
 #define ST_Prog_Ctrl_GPIO_Port GPIOB
 #define BLE_Prog_Ctrl_Pin GPIO_PIN_4

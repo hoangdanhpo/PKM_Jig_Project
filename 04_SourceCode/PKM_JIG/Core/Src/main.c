@@ -42,7 +42,7 @@
 #define ACS712_SENSITIVITY   185L   /* mV per Ampere */
 #define ACS712_OFFSET_MV    2500L   /* mV at zero current */
 /* ADC reference and resolution */
-#define ADC_VREF_MV         5000UL
+#define ADC_VREF_MV         3300UL
 #define ADC_RESOLUTION      4095UL
 /* ADC display update period (ms) */
 #define ADC_UPDATE_PERIOD_MS  500U
@@ -212,6 +212,8 @@ int main(void)
   MX_USB_DEVICE_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
+  /* Calibrate ADC (important on STM32F1 for offset accuracy) */
+  HAL_ADCEx_Calibration_Start(&hadc1);
   /* ADJ for LCD */
   HAL_TIM_PWM_Start(&htim3,TIM_CHANNEL_2);
   __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_2, 50);
@@ -646,8 +648,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BTN3_Pin BTN2_Pin BTN1_Pin */
-  GPIO_InitStruct.Pin = BTN3_Pin|BTN2_Pin|BTN1_Pin;
+  /*Configure GPIO pins : BTN1_Pin BTN2_Pin BTN3_Pin */
+  GPIO_InitStruct.Pin = BTN1_Pin|BTN2_Pin|BTN3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -664,7 +666,7 @@ void f_display_voltage(void)
   CLCD_SetCursor(&LCD1, 3, 2);
   CLCD_WriteString(&LCD1,"ON");
   CLCD_SetCursor(&LCD1, 0, 3);
-  CLCD_WriteString(&LCD1,"Vol:      Cur:    ");
+  CLCD_WriteString(&LCD1,"Vol:       Cur:    ");
   f_pos_lcd(u1l_LCD_pos_Vol, 0);
 }
 void f_display_sw_signal(void)
@@ -802,13 +804,21 @@ void f_update_adc_display(void)
 
     /* --- Voltage --- */
     uint16_t adc_vin = f_read_adc_ch(ADC_CHANNEL_0);
-    /* VBAT_mV = adc × Vref × divider_ratio / ADC_max */
-    /* VBAT in tenths of volt: e.g. 211 → "21.1V" */
-    uint32_t vbat_tenths = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 100U;
+    /* VBAT in hundredths of volt: e.g. 2112 → "21.12V" */
+    uint32_t vbat_h = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 10U;
+    uint8_t vbat_int = (uint8_t)(vbat_h / 100U);
+    uint8_t vbat_d1  = (uint8_t)((vbat_h % 100U) / 10U);
+    uint8_t vbat_d2  = (uint8_t)(vbat_h % 10U);
 
-    /* Update voltage at col 4, row 3 → "21.1V" (5 chars) */
+    /* Manual format "XX.XXV" */
+    buf[0] = '0' + (vbat_int / 10U);
+    buf[1] = '0' + (vbat_int % 10U);
+    buf[2] = '.';
+    buf[3] = '0' + vbat_d1;
+    buf[4] = '0' + vbat_d2;
+    buf[5] = 'V';
+    buf[6] = '\0';
     CLCD_SetCursor(&LCD1, 4, 3);
-    sprintf(buf, "%2d.%1dV", (int)(vbat_tenths / 10U), (int)(vbat_tenths % 10U));
     CLCD_WriteString(&LCD1, buf);
 
     /* --- Current (ACS712) --- */
@@ -817,12 +827,20 @@ void f_update_adc_display(void)
     int32_t  i_ma    = (vout_mv - ACS712_OFFSET_MV) * 1000L / ACS712_SENSITIVITY;
     if (i_ma < 0) { i_ma = 0; }
 
-    /* Current in tenths of Ampere: e.g. 12 → "1.2A" */
-    uint32_t i_tenths = (uint32_t)i_ma / 100U;
+    /* Current in hundredths of Ampere: e.g. 123 → "1.23A" */
+    uint32_t i_h    = (uint32_t)i_ma / 10U;
+    uint8_t  i_int  = (uint8_t)(i_h / 100U);
+    uint8_t  i_d1   = (uint8_t)((i_h % 100U) / 10U);
+    uint8_t  i_d2   = (uint8_t)(i_h % 10U);
 
-    /* Update current at col 14, row 3 → " 1.2A" (5 chars) */
-    CLCD_SetCursor(&LCD1, 14, 3);
-    sprintf(buf, "%2d.%1dA", (int)(i_tenths / 10U), (int)(i_tenths % 10U));
+    /* Manual format "X.XXA" */
+    buf[0] = '0' + i_int;
+    buf[1] = '.';
+    buf[2] = '0' + i_d1;
+    buf[3] = '0' + i_d2;
+    buf[4] = 'A';
+    buf[5] = '\0';
+    CLCD_SetCursor(&LCD1, 15, 3);
     CLCD_WriteString(&LCD1, buf);
 }
 

@@ -18,7 +18,6 @@ def toggle_options():
     if connected:
         option1_radio.config(state="normal")
         option2_radio.config(state="normal")
-        option3_radio.config(state="normal")
         option_radio2_1.config(state="normal")
         option_radio2_2.config(state="normal")
         option_radio2_3.config(state="normal")
@@ -26,7 +25,6 @@ def toggle_options():
     else:
         option1_radio.config(state="disabled")
         option2_radio.config(state="disabled")
-        option3_radio.config(state="disabled")
         option_radio2_1.config(state="disabled")
         option_radio2_2.config(state="disabled")
         option_radio2_3.config(state="disabled")
@@ -97,19 +95,16 @@ refresh_button.grid(row=1, column=1, padx=5, pady=5)
 connect_button = ttk.Button(port_frame, text="Connect", command=connect)
 connect_button.grid(row=2, column=0, columnspan=2, padx=5, pady=5)
 
-option_frame = ttk.LabelFrame(root, text="Select Voltage")
+option_frame = ttk.LabelFrame(root, text="Power Control")
 option_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
 
 option_var = tk.StringVar()
 
-option1_radio = ttk.Radiobutton(option_frame, text="0V", variable=option_var, value="0V", state="disabled", command = f_0V_selected)
+option1_radio = ttk.Radiobutton(option_frame, text="Disable", variable=option_var, value="Disable", state="disabled", command = f_0V_selected)
 option1_radio.grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
-option2_radio = ttk.Radiobutton(option_frame, text="12V", variable=option_var, value="12V", state="disabled", command = f_12V_selected)
+option2_radio = ttk.Radiobutton(option_frame, text="Enable", variable=option_var, value="Enable", state="disabled", command = f_12V_selected)
 option2_radio.grid(row=1, column=0, padx=10, pady=5, sticky="w")
-
-option3_radio = ttk.Radiobutton(option_frame, text="24V", variable=option_var, value="24V", state="disabled", command = f_24V_selected)
-option3_radio.grid(row=2, column=0, padx=10, pady=5, sticky="w")
 
 option_frame2 = ttk.LabelFrame(root, text="Switch signal")
 option_frame2.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")

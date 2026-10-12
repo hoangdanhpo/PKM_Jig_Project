@@ -25,27 +25,78 @@
 /* USER CODE BEGIN Includes */
 #include "usbd_cdc_if.h"
 #include "CLCD.h"
-#include "string.h"
-#include "stdio.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+/* Manual mode screen */
+typedef enum
+{
+  EN_VOLTAGE = 0x00,
+  EN_SWITCH_SIGNAL,
+  EN_DEFAULT              /* Request to go back to voltage screen */
+} SETTING_STATE;
 
+/* App connection state */
+typedef enum
+{
+  DIS_APP = 0x00,
+  CON_APP
+} SETTING_APP;
+
+/* Voltage option, value = option index on LCD */
+typedef enum
+{
+  EN_0V = 0x00,
+  EN_12V,
+  EN_VOL_DEFAULT          /* No pending request */
+} APP_VOLTAGE;
+
+/* Signal option, value = option index on LCD */
+typedef enum
+{
+  EN_ST = 0x00,
+  EN_BLE,
+  EN_UWB,
+  EN_NOT_USE,
+  EN_SIG_DEFAULT          /* No pending request */
+} APP_SIGNAL;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* Voltage divider: R55=20K (top), R58=2K (bottom) → VBAT = VIN_MCU × 11 */
-#define VBAT_DIVIDER_RATIO   11UL
+/* Voltage divider: R55=20K (top), R58=2K (bottom) -> VBAT = VIN_MCU x 11 */
+#define VBAT_DIVIDER_RATIO      11UL
 /* ACS712 5A: sensitivity=185mV/A, zero-current offset=2500mV */
-#define ACS712_SENSITIVITY   185L   /* mV per Ampere */
-#define ACS712_OFFSET_MV    2500L   /* mV at zero current */
-/* ADC reference and resolution */
-#define ADC_VREF_MV         3300UL
-#define ADC_RESOLUTION      4095UL
-/* ADC display update period (ms) */
-#define ADC_UPDATE_PERIOD_MS  500U
+#define ACS712_SENSITIVITY      185L    /* mV per Ampere */
+#define ACS712_OFFSET_MV        2500L   /* mV at zero current */
+/* ADC reference, resolution and conversion timeout */
+#define ADC_VREF_MV             3300UL
+#define ADC_RESOLUTION          4095UL
+#define ADC_TIMEOUT_MS          10U
+/* Voltage/current update period (ms) */
+#define ADC_UPDATE_PERIOD_MS    500U
+/* Button debounce time (ms) */
+#define BTN_DEBOUNCE_MS         5U
+
+/* Number of options on manual screens */
+#define VOL_OPTION_NUM          2U
+#define SIG_OPTION_NUM          4U
+
+/* App screen: value column and field width */
+#define APP_VALUE_COL           9U
+#define APP_VALUE_WIDTH         7U
+
+/* Commands from App (1 byte each) */
+#define APP_CMD_CONNECT         'c'
+#define APP_CMD_DISCONNECT      'd'
+#define APP_CMD_VOL_0V          '1'
+#define APP_CMD_VOL_12V         '2'
+#define APP_CMD_SIG_ST          '4'
+#define APP_CMD_SIG_BLE         '5'
+#define APP_CMD_SIG_UWB         '6'
+#define APP_CMD_SIG_NOT_USE     '7'
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,32 +110,35 @@ ADC_HandleTypeDef hadc1;
 TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
-CLCD_Name     LCD1;                 /* Create LCD*/
-SETTING_STATE enl_setting_state;    /* System state: SETTING or RUNNING */
+static CLCD_Name LCD1;
 
-/* Postion of option on LCD (x,y)*/
-uint8_t u1l_LCD_pos_Vol[3][2] =
+/* Shared with USB Rx interrupt */
+static volatile SETTING_STATE enl_setting_state;    /* Manual mode screen */
+static volatile SETTING_APP   Is_App_Connect;
+static volatile APP_VOLTAGE   App_Voltage;          /* Pending voltage request from App */
+static volatile APP_SIGNAL    App_Signal;           /* Pending signal request from App */
+static volatile uint8_t       Is_App_Screen_Ready;  /* 0: App screen must be (re)drawn */
+
+/* Cursor position of options on LCD (x,y) */
+static const uint8_t u1l_LCD_pos_Vol[VOL_OPTION_NUM][2] =
 {
-  { 1U, 1U},
-  { 1U, 2U}
+  { 1U, 1U},    /* OFF */
+  { 1U, 2U}     /* ON  */
 };
 
-/* Postion of option on LCD (x,y)*/
-uint8_t u1l_LCD_pos_Sig[4][2] =
+static const uint8_t u1l_LCD_pos_Sig[SIG_OPTION_NUM][2] =
 {
-  { 1U, 1U},
-  { 1U, 2U},
-  { 9U, 1U},
-  { 9U, 2U}
+  { 1U, 1U},    /* ST uC   */
+  { 1U, 2U},    /* BLE     */
+  { 9U, 1U},    /* UWB     */
+  { 9U, 2U}     /* Not use */
 };
 
-uint8_t u1l_LCD_pos_cur;
+static uint8_t u1l_LCD_pos_cur;     /* Selected option on manual screen */
 
-SETTING_APP Is_App_Connect;
-APP_VOLTAGE App_Voltage;
-APP_SIGNAL App_Signal;
-uint8_t Is_app_status;
-
+/* Text on App screen, indexed by APP_VOLTAGE / APP_SIGNAL */
+static const char *const App_Voltage_Text[] = { "0V", "12V" };
+static const char *const App_Signal_Text[]  = { "ST uC", "BLE", "UWB", "NOT USE" };
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -93,92 +147,48 @@ static void MX_GPIO_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
-void clear_LCD_pos(void);
-void f_display_voltage(void);
-void f_display_sw_signal(void);
-void f_clr_pos_lcd(uint8_t u1l_LCD_pos[][2]);
-void f_pos_lcd(uint8_t u1l_LCD_pos[][2] ,uint8_t row);
-void f_voltage_0V(void);
-void f_voltage_12V(void);
-void f_active_sw(void);
-void f_deactive_sw(void);
-void f_active_ST(void);
-void f_active_BLE(void);
-void f_active_UWB(void);
-void f_sw_signal_not_use(void);
-uint8_t f_display_app(void);
+/* App command */
+static void f_handle_app_cmd(uint8_t cmd);
+/* Mode processing */
+static void f_manual_mode_process(void);
+static void f_app_mode_process(void);
+/* Screens */
+static void f_enter_voltage_screen(void);
+static void f_enter_signal_screen(void);
+static void f_enter_app_screen(void);
+static void f_draw_voltage_screen(void);
+static void f_draw_signal_screen(void);
+static void f_draw_app_screen(void);
+static void f_pos_lcd(const uint8_t u1l_LCD_pos[][2], uint8_t num, uint8_t row);
+static void f_lcd_write_field(uint8_t x, uint8_t y, uint8_t width, const char *text);
+/* Output control */
+static void f_apply_voltage(APP_VOLTAGE voltage);
+static void f_apply_signal(APP_SIGNAL signal);
+static void f_active_sw(void);
+static void f_deactive_sw(void);
+/* Button and timing */
+static uint8_t f_is_button_pressed(GPIO_TypeDef *port, uint16_t pin);
+static void f_wait_button_release(GPIO_TypeDef *port, uint16_t pin);
+static uint8_t f_is_period_elapsed(uint32_t *last_tick, uint32_t period);
+/* Voltage and current */
 static uint16_t f_read_adc_ch(uint32_t channel);
 static void f_read_vol_cur(uint32_t *vbat_h, uint32_t *i_h);
-void f_update_adc_display(uint32_t vbat_h, uint32_t i_h);
-void f_send_adc_app(uint32_t vbat_h, uint32_t i_h);
+static void f_update_adc_display(uint32_t vbat_h, uint32_t i_h);
+static void f_send_adc_app(uint32_t vbat_h, uint32_t i_h);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* Handle Rx from Tx App */
+/**
+ * @brief  Handle data from App (called from USB Rx interrupt).
+ *         Each byte is one command.
+ */
 void USBRxHandler(uint8_t* buf, uint32_t len)
 {
-  /* Button connect */
-  if (strncmp(buf,"c",len) == 0)
+  for (uint32_t i = 0U; i < len; i++)
   {
-    Is_App_Connect = CON_APP;
-    Is_app_status = E_NOT_OK;
+    f_handle_app_cmd(buf[i]);
   }
-
-  /* Button disconnect */
-  if (strncmp(buf,"d",len) == 0)
-  {
-    Is_App_Connect = DIS_APP;
-    enl_setting_state = EN_DEFAULT;
-  }
-
-  /* After app connect */
-  if ( Is_App_Connect == CON_APP )
-  {
-    /* Select Voltage: 0V */
-    if (strncmp(buf,"1",len) == 0)
-    {
-      App_Voltage = EN_0V;
-    }
-
-    /* Select Voltage: 12V */
-    if (strncmp(buf,"2",len) == 0)
-    {
-      App_Voltage = EN_12V;
-    }
-
-    /* Select Voltage: 24V */
-    if (strncmp(buf,"3",len) == 0)
-    {
-      App_Voltage = EN_24V;
-    }
-
-    /* Signal: ST uC */
-    if (strncmp(buf,"4",len) == 0)
-    {
-      App_Signal = EN_ST;
-    }
-
-    /* Signal: BLE */
-    if (strncmp(buf,"5",len) == 0)
-    {
-      App_Signal = EN_BLE;
-
-    }
-
-    /* Signal: UWB */
-    if (strncmp(buf,"6",len) == 0)
-    {
-      App_Signal = EN_UWB;
-    }
-
-    /* Signal: Not use */
-    if (strncmp(buf,"7",len) == 0)
-    {
-      App_Signal = EN_NOT_USE;
-    }
-  }
-  return;
 }
 /* USER CODE END 0 */
 
@@ -217,10 +227,8 @@ int main(void)
   /* Calibrate ADC (important on STM32F1 for offset accuracy) */
   HAL_ADCEx_Calibration_Start(&hadc1);
   /* ADJ for LCD */
-  HAL_TIM_PWM_Start(&htim3,TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
   __HAL_TIM_SetCompare(&htim3, TIM_CHANNEL_2, 50);
-
-  /* Enable LCD */
 
   /* Init LCD */
   CLCD_4BIT_Init(&LCD1, 20, 4, LCD_RS_GPIO_Port, LCD_RS_Pin, LCD_EN_GPIO_Port, LCD_EN_Pin,
@@ -228,16 +236,11 @@ int main(void)
                   LCD_D6_GPIO_Port, LCD_D6_Pin, LCD_D7_GPIO_Port, LCD_D7_Pin);
 
   /* Init setting for system */
-  enl_setting_state = EN_VOLTAGE;
-  Is_App_Connect = DIS_APP;
-  u1l_LCD_pos_cur = 0U;
-  Is_app_status = E_NOT_OK;
-  App_Voltage = EN_VOL_DEFAULT;
-  App_Signal = EN_SIG_DEFAULT;
-
-  f_display_voltage();
-  f_voltage_0V();
-  f_deactive_sw();
+  Is_App_Connect      = DIS_APP;
+  Is_App_Screen_Ready = 0U;
+  App_Voltage         = EN_VOL_DEFAULT;
+  App_Signal          = EN_SIG_DEFAULT;
+  f_enter_voltage_screen();
 
   /* USER CODE END 2 */
 
@@ -245,234 +248,13 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* Disconnect JIG App */
-    if ( Is_App_Connect == DIS_APP )
+    if (Is_App_Connect == DIS_APP)
     {
-      switch (enl_setting_state)
-      {
-        /* State Voltage*/
-        case EN_VOLTAGE:
-          /* Continuous voltage and current update every ADC_UPDATE_PERIOD_MS */
-          {
-            static uint32_t u4l_last_adc_tick = 0U;
-            if ((HAL_GetTick() - u4l_last_adc_tick) >= ADC_UPDATE_PERIOD_MS)
-            {
-              uint32_t u4l_vbat_h, u4l_i_h;
-              u4l_last_adc_tick = HAL_GetTick();
-              f_read_vol_cur(&u4l_vbat_h, &u4l_i_h);
-              f_update_adc_display(u4l_vbat_h, u4l_i_h);
-            }
-          }
-          /* Select voltage by BTN3 */
-          if (HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0)
-          {
-              HAL_Delay(5);
-              if( HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0)
-              {
-                  /* Control pointer select voltage option */
-                  u1l_LCD_pos_cur++;
-                  if (u1l_LCD_pos_cur > 1)
-                  {
-                    u1l_LCD_pos_cur = 0;
-                  }
-                  else
-                  {
-                    /* do nothing */
-                  }
-                  f_pos_lcd(u1l_LCD_pos_Vol, u1l_LCD_pos_cur);
-
-                  /* Handle function of voltage */
-                  switch (u1l_LCD_pos_cur)
-                  {
-                    case 0:
-                      f_voltage_0V();
-                      break;
-                    case 1:
-                      f_voltage_12V();
-                      break;
-                  }
-                  while(HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0);
-              }
-          }
-
-          /* Switch from Voltage to Signal */
-          if (HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin) == 0)
-          {
-              HAL_Delay(5);
-              if( HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin) == 0)
-              {
-                  /* Clear display and switch signal state */
-                  u1l_LCD_pos_cur = 0U;
-                  f_active_sw();
-                  CLCD_Clear(&LCD1);
-                  f_display_sw_signal();
-                  enl_setting_state = EN_SWITCH_SIGNAL;
-                  while(HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin) == 0);
-              }
-          }
-        break;
-
-      /* State Voltage*/
-        case EN_SWITCH_SIGNAL:
-          /* Select signal by BTN3 */
-          if (HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0)
-          {
-              HAL_Delay(5);
-              if( HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0)
-              {
-                  u1l_LCD_pos_cur++;
-                  if (u1l_LCD_pos_cur > 3)
-                  {
-                    u1l_LCD_pos_cur = 0;
-                  }
-                  else
-                  {
-                    /* do nothing */
-                  }
-                  f_pos_lcd(u1l_LCD_pos_Sig, u1l_LCD_pos_cur);
-                  switch (u1l_LCD_pos_cur)
-                  {
-                    case 0:
-                      f_active_ST();
-                      break;
-                    case 1:
-                      f_active_BLE();
-                      break;
-                    case 2:
-                      f_active_UWB();
-                      break;
-                    case 3:
-                      f_sw_signal_not_use();
-                      break;
-                  }
-                  while(HAL_GPIO_ReadPin(BTN3_GPIO_Port, BTN3_Pin) == 0);
-              }
-          }
-
-          /* Switch from Signal to Voltage */
-          if (HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin) == 0)
-          {
-              HAL_Delay(5);
-              if( HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin) == 0)
-              {
-                  /* Clear display and switch Voltage state */
-                  enl_setting_state = EN_VOLTAGE;
-                  u1l_LCD_pos_cur = 0U;
-                  f_voltage_0V();
-                  f_deactive_sw();
-                  CLCD_Clear(&LCD1);
-                  f_display_voltage();
-                  while(HAL_GPIO_ReadPin(BTN2_GPIO_Port, BTN2_Pin) == 0);
-              }
-          }
-          break;
-
-        default:
-          /* Handle for switching from APP to Manual */
-          CLCD_Clear(&LCD1);
-          enl_setting_state = EN_VOLTAGE;
-          f_display_voltage();
-          break;
-        }
+      f_manual_mode_process();
     }
-
-    /* Connect JIG App */
     else
     {
-      /* Prepare for app control and display information app on LCD */
-      if ( Is_app_status == E_NOT_OK )
-      {
-        Is_app_status = f_display_app();
-        f_voltage_0V();
-        f_deactive_sw();
-      }
-      else
-      {
-				f_active_sw();
-        switch ( App_Voltage )
-        {
-            case EN_0V:
-              f_voltage_0V();
-              CLCD_SetCursor(&LCD1, 9, 1);
-              CLCD_WriteString(&LCD1,"   ");
-              CLCD_SetCursor(&LCD1, 9, 1);
-              CLCD_WriteString(&LCD1,"0V");
-              App_Voltage = EN_VOL_DEFAULT;
-              break;
-
-            case EN_12V:
-              f_voltage_12V();
-              CLCD_SetCursor(&LCD1, 9, 1);
-              CLCD_WriteString(&LCD1,"   ");
-              CLCD_SetCursor(&LCD1, 9, 1);
-              CLCD_WriteString(&LCD1,"12V");
-              App_Voltage = EN_VOL_DEFAULT;
-              break;
-
-            default:
-              /*do nothing */
-              break;
-        }
-
-        switch ( App_Signal )
-        {
-          case EN_ST:
-            f_active_ST();
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"       ");
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"ST uC");
-            App_Signal = EN_SIG_DEFAULT;
-            break;
-
-          case EN_BLE:
-            f_active_BLE();
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"       ");
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"BLE");
-            App_Signal = EN_SIG_DEFAULT;
-            break;
-
-          case EN_UWB:
-            f_active_UWB();
-
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"       ");
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"UWB");
-
-            App_Signal = EN_SIG_DEFAULT;
-            break;
-
-          case EN_NOT_USE:
-            f_sw_signal_not_use();
-
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"       ");
-            CLCD_SetCursor(&LCD1, 9, 2);
-            CLCD_WriteString(&LCD1,"NOT USE");
-
-            App_Signal = EN_SIG_DEFAULT;
-            break;
-
-          default:
-            /*do nothing */
-            break;
-        }
-
-        /* Send voltage and current to App every ADC_UPDATE_PERIOD_MS */
-        {
-          static uint32_t u4l_last_app_tick = 0U;
-          if ((HAL_GetTick() - u4l_last_app_tick) >= ADC_UPDATE_PERIOD_MS)
-          {
-            uint32_t u4l_vbat_h, u4l_i_h;
-            u4l_last_app_tick = HAL_GetTick();
-            f_read_vol_cur(&u4l_vbat_h, &u4l_i_h);
-            f_send_adc_app(u4l_vbat_h, u4l_i_h);
-          }
-        }
-      }
+      f_app_mode_process();
     }
     /* USER CODE END WHILE */
 
@@ -673,138 +455,339 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void f_display_voltage(void)
+/* ===================== App command ===================== */
+
+/**
+ * @brief  Handle one command byte from App.
+ *         Control commands are accepted only after App connect.
+ */
+static void f_handle_app_cmd(uint8_t cmd)
 {
-  CLCD_SetCursor(&LCD1, 0, 0);
-  CLCD_WriteString(&LCD1,"Power enable");
-  CLCD_SetCursor(&LCD1, 3, 1);
-  CLCD_WriteString(&LCD1,"OFF");
-  CLCD_SetCursor(&LCD1, 3, 2);
-  CLCD_WriteString(&LCD1,"ON");
-  CLCD_SetCursor(&LCD1, 0, 3);
-  CLCD_WriteString(&LCD1,"Vol:       Cur:    ");
-  f_pos_lcd(u1l_LCD_pos_Vol, 0);
-}
-void f_display_sw_signal(void)
-{
-  CLCD_SetCursor(&LCD1, 0, 0);
-  CLCD_WriteString(&LCD1,"Switch signal");
-  CLCD_SetCursor(&LCD1, 3, 1);
-  CLCD_WriteString(&LCD1,"ST uC");
-  CLCD_SetCursor(&LCD1, 11, 1);
-  CLCD_WriteString(&LCD1,"UWB");
-  CLCD_SetCursor(&LCD1, 3, 2);
-  CLCD_WriteString(&LCD1,"BLE");
-  CLCD_SetCursor(&LCD1, 11, 2);
-  CLCD_WriteString(&LCD1,"Not use");
-  f_pos_lcd(u1l_LCD_pos_Sig, 0);
+  switch (cmd)
+  {
+    case APP_CMD_CONNECT:
+      Is_App_Connect      = CON_APP;
+      Is_App_Screen_Ready = 0U;
+      break;
+
+    case APP_CMD_DISCONNECT:
+      Is_App_Connect    = DIS_APP;
+      enl_setting_state = EN_DEFAULT;
+      break;
+
+    default:
+      if (Is_App_Connect == CON_APP)
+      {
+        switch (cmd)
+        {
+          case APP_CMD_VOL_0V:      App_Voltage = EN_0V;      break;
+          case APP_CMD_VOL_12V:     App_Voltage = EN_12V;     break;
+          case APP_CMD_SIG_ST:      App_Signal  = EN_ST;      break;
+          case APP_CMD_SIG_BLE:     App_Signal  = EN_BLE;     break;
+          case APP_CMD_SIG_UWB:     App_Signal  = EN_UWB;     break;
+          case APP_CMD_SIG_NOT_USE: App_Signal  = EN_NOT_USE; break;
+          default:                  /* Unknown command */     break;
+        }
+      }
+      break;
+  }
 }
 
-uint8_t f_display_app(void)
-{
-  uint8_t ret;
+/* ===================== Mode processing ===================== */
 
+/**
+ * @brief  Manual mode: control by buttons
+ *         BTN3: select next option, BTN2: switch between voltage/signal screen
+ */
+static void f_manual_mode_process(void)
+{
+  static uint32_t u4l_last_adc_tick = 0U;
+
+  switch (enl_setting_state)
+  {
+    case EN_VOLTAGE:
+      /* Update voltage and current on LCD */
+      if (f_is_period_elapsed(&u4l_last_adc_tick, ADC_UPDATE_PERIOD_MS) != 0U)
+      {
+        uint32_t u4l_vbat_h, u4l_i_h;
+        f_read_vol_cur(&u4l_vbat_h, &u4l_i_h);
+        f_update_adc_display(u4l_vbat_h, u4l_i_h);
+      }
+
+      if (f_is_button_pressed(BTN3_GPIO_Port, BTN3_Pin) != 0U)
+      {
+        u1l_LCD_pos_cur = (uint8_t)((u1l_LCD_pos_cur + 1U) % VOL_OPTION_NUM);
+        f_pos_lcd(u1l_LCD_pos_Vol, VOL_OPTION_NUM, u1l_LCD_pos_cur);
+        f_apply_voltage((APP_VOLTAGE)u1l_LCD_pos_cur);
+        f_wait_button_release(BTN3_GPIO_Port, BTN3_Pin);
+      }
+
+      if (f_is_button_pressed(BTN2_GPIO_Port, BTN2_Pin) != 0U)
+      {
+        f_enter_signal_screen();
+        f_wait_button_release(BTN2_GPIO_Port, BTN2_Pin);
+      }
+      break;
+
+    case EN_SWITCH_SIGNAL:
+      if (f_is_button_pressed(BTN3_GPIO_Port, BTN3_Pin) != 0U)
+      {
+        u1l_LCD_pos_cur = (uint8_t)((u1l_LCD_pos_cur + 1U) % SIG_OPTION_NUM);
+        f_pos_lcd(u1l_LCD_pos_Sig, SIG_OPTION_NUM, u1l_LCD_pos_cur);
+        f_apply_signal((APP_SIGNAL)u1l_LCD_pos_cur);
+        f_wait_button_release(BTN3_GPIO_Port, BTN3_Pin);
+      }
+
+      if (f_is_button_pressed(BTN2_GPIO_Port, BTN2_Pin) != 0U)
+      {
+        f_enter_voltage_screen();
+        f_wait_button_release(BTN2_GPIO_Port, BTN2_Pin);
+      }
+      break;
+
+    default:
+      /* Back from App mode */
+      f_enter_voltage_screen();
+      break;
+  }
+}
+
+/**
+ * @brief  App mode: apply requests from App and send voltage/current to App
+ */
+static void f_app_mode_process(void)
+{
+  static uint32_t u4l_last_app_tick = 0U;
+  APP_VOLTAGE enl_voltage;
+  APP_SIGNAL  enl_signal;
+
+  if (Is_App_Screen_Ready == 0U)
+  {
+    Is_App_Screen_Ready = 1U;
+    f_enter_app_screen();
+  }
+
+  enl_voltage = App_Voltage;
+  if (enl_voltage != EN_VOL_DEFAULT)
+  {
+    App_Voltage = EN_VOL_DEFAULT;
+    f_apply_voltage(enl_voltage);
+    f_lcd_write_field(APP_VALUE_COL, 1U, APP_VALUE_WIDTH, App_Voltage_Text[enl_voltage]);
+  }
+
+  enl_signal = App_Signal;
+  if (enl_signal != EN_SIG_DEFAULT)
+  {
+    App_Signal = EN_SIG_DEFAULT;
+    f_apply_signal(enl_signal);
+    f_lcd_write_field(APP_VALUE_COL, 2U, APP_VALUE_WIDTH, App_Signal_Text[enl_signal]);
+  }
+
+  if (f_is_period_elapsed(&u4l_last_app_tick, ADC_UPDATE_PERIOD_MS) != 0U)
+  {
+    uint32_t u4l_vbat_h, u4l_i_h;
+    f_read_vol_cur(&u4l_vbat_h, &u4l_i_h);
+    f_send_adc_app(u4l_vbat_h, u4l_i_h);
+  }
+}
+
+/* ===================== Screens ===================== */
+
+/* Voltage screen, power OFF, signal switch disabled */
+static void f_enter_voltage_screen(void)
+{
+  enl_setting_state = EN_VOLTAGE;
+  u1l_LCD_pos_cur   = 0U;
+  f_apply_voltage(EN_0V);
+  f_deactive_sw();
+  f_draw_voltage_screen();
+}
+
+/* Signal screen, ST uC selected, signal switch enabled */
+static void f_enter_signal_screen(void)
+{
+  enl_setting_state = EN_SWITCH_SIGNAL;
+  u1l_LCD_pos_cur   = 0U;
+  f_apply_signal(EN_ST);
+  f_active_sw();
+  f_draw_signal_screen();
+}
+
+/* App screen, power OFF, ST uC selected, signal switch enabled */
+static void f_enter_app_screen(void)
+{
+  f_apply_voltage(EN_0V);
+  f_apply_signal(EN_ST);
+  f_active_sw();
+  f_draw_app_screen();
+}
+
+static void f_draw_voltage_screen(void)
+{
   CLCD_Clear(&LCD1);
-
   CLCD_SetCursor(&LCD1, 0, 0);
-  CLCD_WriteString(&LCD1,"Connected JIG App");
+  CLCD_WriteString(&LCD1, "Power enable");
+  CLCD_SetCursor(&LCD1, 3, 1);
+  CLCD_WriteString(&LCD1, "OFF");
+  CLCD_SetCursor(&LCD1, 3, 2);
+  CLCD_WriteString(&LCD1, "ON");
+  CLCD_SetCursor(&LCD1, 0, 3);
+  CLCD_WriteString(&LCD1, "Vol:       Cur:    ");
+  f_pos_lcd(u1l_LCD_pos_Vol, VOL_OPTION_NUM, 0U);
+}
+
+static void f_draw_signal_screen(void)
+{
+  CLCD_Clear(&LCD1);
+  CLCD_SetCursor(&LCD1, 0, 0);
+  CLCD_WriteString(&LCD1, "Switch signal");
+  CLCD_SetCursor(&LCD1, 3, 1);
+  CLCD_WriteString(&LCD1, "ST uC");
+  CLCD_SetCursor(&LCD1, 11, 1);
+  CLCD_WriteString(&LCD1, "UWB");
+  CLCD_SetCursor(&LCD1, 3, 2);
+  CLCD_WriteString(&LCD1, "BLE");
+  CLCD_SetCursor(&LCD1, 11, 2);
+  CLCD_WriteString(&LCD1, "Not use");
+  f_pos_lcd(u1l_LCD_pos_Sig, SIG_OPTION_NUM, 0U);
+}
+
+static void f_draw_app_screen(void)
+{
+  CLCD_Clear(&LCD1);
+  CLCD_SetCursor(&LCD1, 0, 0);
+  CLCD_WriteString(&LCD1, "Connected JIG App");
   CLCD_SetCursor(&LCD1, 0, 1);
-  CLCD_WriteString(&LCD1,"Voltage: ");
+  CLCD_WriteString(&LCD1, "Voltage: ");
   CLCD_SetCursor(&LCD1, 0, 2);
-  CLCD_WriteString(&LCD1,"Signal : ");
-
-  ret = E_OK;
-  return ret;
+  CLCD_WriteString(&LCD1, "Signal : ");
 }
 
-void f_clr_pos_lcd(uint8_t u1l_LCD_pos[][2])
+/* Move '>' cursor to option 'row' */
+static void f_pos_lcd(const uint8_t u1l_LCD_pos[][2], uint8_t num, uint8_t row)
 {
-  uint8_t len;
-  if (enl_setting_state == EN_VOLTAGE)
+  for (uint8_t i = 0U; i < num; i++)
   {
-    len = 3U;
+    CLCD_SetCursor(&LCD1, u1l_LCD_pos[i][0], u1l_LCD_pos[i][1]);
+    CLCD_WriteString(&LCD1, " ");
   }
-  else
+  CLCD_SetCursor(&LCD1, u1l_LCD_pos[row][0], u1l_LCD_pos[row][1]);
+  CLCD_WriteString(&LCD1, ">");
+}
+
+/* Clear 'width' characters at (x,y) then write text */
+static void f_lcd_write_field(uint8_t x, uint8_t y, uint8_t width, const char *text)
+{
+  CLCD_SetCursor(&LCD1, x, y);
+  for (uint8_t i = 0U; i < width; i++)
   {
-    len = 4U;
+    CLCD_WriteChar(&LCD1, ' ');
   }
-  for (uint8_t i = 0U; i < len; i++)
+  CLCD_SetCursor(&LCD1, x, y);
+  CLCD_WriteString(&LCD1, (char *)text);
+}
+
+/* ===================== Output control ===================== */
+
+static void f_apply_voltage(APP_VOLTAGE voltage)
+{
+  switch (voltage)
   {
-    CLCD_SetCursor(&LCD1, u1l_LCD_pos[i][0],u1l_LCD_pos[i][1] );
-    CLCD_WriteString(&LCD1," ");
+    case EN_0V:
+      HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(EN_24V_n_GPIO_Port, EN_24V_n_Pin, GPIO_PIN_RESET);
+      break;
+
+    case EN_12V:
+      HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_SET);
+      break;
+
+    default:
+      break;
   }
 }
 
-void f_pos_lcd(uint8_t u1l_LCD_pos[][2],uint8_t row)
+/* JTAG mux select (S1 S0): 00 ST uC, 01 BLE, 10 UWB, 11 Not use */
+static void f_apply_signal(APP_SIGNAL signal)
 {
-    f_clr_pos_lcd(u1l_LCD_pos);
-    CLCD_SetCursor(&LCD1, u1l_LCD_pos[row][0],u1l_LCD_pos[row][1] );
-    CLCD_WriteString(&LCD1,">");
+  static const GPIO_PinState sel[SIG_OPTION_NUM][2] =
+  {
+    /*  S0              S1           */
+    { GPIO_PIN_RESET, GPIO_PIN_RESET },   /* ST uC   */
+    { GPIO_PIN_SET,   GPIO_PIN_RESET },   /* BLE     */
+    { GPIO_PIN_RESET, GPIO_PIN_SET   },   /* UWB     */
+    { GPIO_PIN_SET,   GPIO_PIN_SET   }    /* Not use */
+  };
+
+  if (signal < EN_SIG_DEFAULT)
+  {
+    HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, sel[signal][0]);
+    HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, sel[signal][1]);
+  }
 }
 
-void f_voltage_0V(void)
+static void f_active_sw(void)
 {
-    HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(EN_24V_n_GPIO_Port, EN_24V_n_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(JTAG_EN_n_GPIO_Port, JTAG_EN_n_Pin, GPIO_PIN_RESET);
 }
 
-void f_voltage_12V(void)
+static void f_deactive_sw(void)
 {
-    HAL_GPIO_WritePin(EN_12V_n_GPIO_Port, EN_12V_n_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(JTAG_EN_n_GPIO_Port, JTAG_EN_n_Pin, GPIO_PIN_SET);
+  f_apply_signal(EN_ST);
 }
 
-void f_active_sw(void)
+/* ===================== Button and timing ===================== */
+
+/* Return 1 if button (active low) is pressed after debounce */
+static uint8_t f_is_button_pressed(GPIO_TypeDef *port, uint16_t pin)
 {
-    HAL_GPIO_WritePin(JTAG_EN_n_GPIO_Port, JTAG_EN_n_Pin, GPIO_PIN_RESET);
+  if (HAL_GPIO_ReadPin(port, pin) != GPIO_PIN_RESET)
+  {
+    return 0U;
+  }
+  HAL_Delay(BTN_DEBOUNCE_MS);
+  return (HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET) ? 1U : 0U;
 }
 
-void f_deactive_sw(void)
+static void f_wait_button_release(GPIO_TypeDef *port, uint16_t pin)
 {
-    /*T.B.D*/
-    HAL_GPIO_WritePin(JTAG_EN_n_GPIO_Port, JTAG_EN_n_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, GPIO_PIN_RESET);
+  while (HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET)
+  {
+  }
 }
 
-void f_active_ST(void)
+/* Return 1 (and restart period) if 'period' ms elapsed since *last_tick */
+static uint8_t f_is_period_elapsed(uint32_t *last_tick, uint32_t period)
 {
-    HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, GPIO_PIN_RESET);
+  uint32_t now = HAL_GetTick();
+  if ((now - *last_tick) >= period)
+  {
+    *last_tick = now;
+    return 1U;
+  }
+  return 0U;
 }
 
-void f_active_BLE(void)
-{
-    HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, GPIO_PIN_RESET);
-}
-
-void f_active_UWB(void)
-{
-    HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, GPIO_PIN_SET);
-}
-
-void f_sw_signal_not_use(void)
-{
-    HAL_GPIO_WritePin(JTAG_S0_GPIO_Port, JTAG_S0_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(JTAG_S1_GPIO_Port, JTAG_S1_Pin, GPIO_PIN_SET);
-}
+/* ===================== Voltage and current ===================== */
 
 /**
  * @brief  Switch ADC channel, perform one conversion and return raw value.
  */
 static uint16_t f_read_adc_ch(uint32_t channel)
 {
-    ADC_ChannelConfTypeDef sConfig = {0};
-    sConfig.Channel      = channel;
-    sConfig.Rank         = ADC_REGULAR_RANK_1;
-    sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
-    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 10U);
-    uint16_t val = (uint16_t)HAL_ADC_GetValue(&hadc1);
-    HAL_ADC_Stop(&hadc1);
-    return val;
+  ADC_ChannelConfTypeDef sConfig = {0};
+  uint16_t val;
+
+  sConfig.Channel      = channel;
+  sConfig.Rank         = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_239CYCLES_5;
+  HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+  HAL_ADC_Start(&hadc1);
+  HAL_ADC_PollForConversion(&hadc1, ADC_TIMEOUT_MS);
+  val = (uint16_t)HAL_ADC_GetValue(&hadc1);
+  HAL_ADC_Stop(&hadc1);
+  return val;
 }
 
 /**
@@ -816,75 +799,55 @@ static uint16_t f_read_adc_ch(uint32_t channel)
  */
 static void f_read_vol_cur(uint32_t *vbat_h, uint32_t *i_h)
 {
-    /* --- Voltage --- */
-    uint16_t adc_vin = f_read_adc_ch(ADC_CHANNEL_0);
-    *vbat_h = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 10U;
+  uint16_t adc_vin = f_read_adc_ch(ADC_CHANNEL_0);
+  *vbat_h = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 10U;
 
-    /* --- Current (ACS712) --- */
-    uint16_t adc_iin = f_read_adc_ch(ADC_CHANNEL_1);
-    int32_t  vout_mv = (int32_t)((uint32_t)adc_iin * ADC_VREF_MV / ADC_RESOLUTION);
-    int32_t  i_ma    = (vout_mv - ACS712_OFFSET_MV) * 1000L / ACS712_SENSITIVITY;
-    if (i_ma < 0) { i_ma = 0; }
-    *i_h = (uint32_t)i_ma / 10U;
+  uint16_t adc_iin = f_read_adc_ch(ADC_CHANNEL_1);
+  int32_t  vout_mv = (int32_t)((uint32_t)adc_iin * ADC_VREF_MV / ADC_RESOLUTION);
+  int32_t  i_ma    = (vout_mv - ACS712_OFFSET_MV) * 1000L / ACS712_SENSITIVITY;
+  if (i_ma < 0)
+  {
+    i_ma = 0;
+  }
+  *i_h = (uint32_t)i_ma / 10U;
 }
 
 /**
- * @brief  Update row 3 of LCD: "Vol: XX.XXV  Cur: X.XXA"
+ * @brief  Update row 3 of LCD: "Vol: XX.XXV     Cur: X.XXA"
  */
-void f_update_adc_display(uint32_t vbat_h, uint32_t i_h)
+static void f_update_adc_display(uint32_t vbat_h, uint32_t i_h)
 {
-    char buf[8];
+  char buf[8];
 
-    /* --- Voltage --- */
-    uint8_t vbat_int = (uint8_t)(vbat_h / 100U);
-    uint8_t vbat_d1  = (uint8_t)((vbat_h % 100U) / 10U);
-    uint8_t vbat_d2  = (uint8_t)(vbat_h % 10U);
+  (void)snprintf(buf, sizeof(buf), "%02lu.%02luV",
+                 (unsigned long)(vbat_h / 100U), (unsigned long)(vbat_h % 100U));
+  CLCD_SetCursor(&LCD1, 4, 3);
+  CLCD_WriteString(&LCD1, buf);
 
-    /* Manual format "XX.XXV" */
-    buf[0] = '0' + (vbat_int / 10U);
-    buf[1] = '0' + (vbat_int % 10U);
-    buf[2] = '.';
-    buf[3] = '0' + vbat_d1;
-    buf[4] = '0' + vbat_d2;
-    buf[5] = 'V';
-    buf[6] = '\0';
-    CLCD_SetCursor(&LCD1, 4, 3);
-    CLCD_WriteString(&LCD1, buf);
-
-    /* --- Current --- */
-    uint8_t  i_int  = (uint8_t)(i_h / 100U);
-    uint8_t  i_d1   = (uint8_t)((i_h % 100U) / 10U);
-    uint8_t  i_d2   = (uint8_t)(i_h % 10U);
-
-    /* Manual format "X.XXA" */
-    buf[0] = '0' + i_int;
-    buf[1] = '.';
-    buf[2] = '0' + i_d1;
-    buf[3] = '0' + i_d2;
-    buf[4] = 'A';
-    buf[5] = '\0';
-    CLCD_SetCursor(&LCD1, 15, 3);
-    CLCD_WriteString(&LCD1, buf);
+  (void)snprintf(buf, sizeof(buf), "%lu.%02luA",
+                 (unsigned long)(i_h / 100U), (unsigned long)(i_h % 100U));
+  CLCD_SetCursor(&LCD1, 15, 3);
+  CLCD_WriteString(&LCD1, buf);
 }
 
 /**
  * @brief  Send voltage and current to App over USB CDC.
  *         Frame format: "V:12.34,I:1.23\r\n"
  */
-void f_send_adc_app(uint32_t vbat_h, uint32_t i_h)
+static void f_send_adc_app(uint32_t vbat_h, uint32_t i_h)
 {
-    /* Static: USB transmits asynchronously from this buffer */
-    static char tx_buf[32];
-    int len;
+  /* Static: USB transmits asynchronously from this buffer */
+  static char tx_buf[32];
+  int len;
 
-    len = snprintf(tx_buf, sizeof(tx_buf), "V:%lu.%02lu,I:%lu.%02lu\r\n",
-                   (unsigned long)(vbat_h / 100U), (unsigned long)(vbat_h % 100U),
-                   (unsigned long)(i_h / 100U), (unsigned long)(i_h % 100U));
-    if (len > 0)
-    {
-        /* Skip this frame if USB is busy, next period will send again */
-        (void)CDC_Transmit_FS((uint8_t *)tx_buf, (uint16_t)len);
-    }
+  len = snprintf(tx_buf, sizeof(tx_buf), "V:%lu.%02lu,I:%lu.%02lu\r\n",
+                 (unsigned long)(vbat_h / 100U), (unsigned long)(vbat_h % 100U),
+                 (unsigned long)(i_h / 100U), (unsigned long)(i_h % 100U));
+  if (len > 0)
+  {
+    /* Skip this frame if USB is busy, next period will send again */
+    (void)CDC_Transmit_FS((uint8_t *)tx_buf, (uint16_t)len);
+  }
 }
 
 /* USER CODE END 4 */

@@ -96,38 +96,6 @@ void USBRxHandler(uint8_t* buf, uint32_t len);
 #define EN_12V_n_GPIO_Port GPIOB
 /* USER CODE BEGIN Private defines */
 
-#define E_OK 			0U
-#define E_NOT_OK 	1U
-
-typedef enum
-{
-    EN_VOLTAGE = 0x00,
-    EN_SWITCH_SIGNAL,
-		EN_DEFAULT
-} SETTING_STATE;
-
-typedef enum
-{
-    DIS_APP = 0x00,
-    CON_APP
-} SETTING_APP;
-
-typedef enum
-{
-    EN_0V = 0x00,
-    EN_12V,
-		EN_24V,
-		EN_VOL_DEFAULT
-} APP_VOLTAGE;
-
-typedef enum
-{
-    EN_ST = 0x00,
-    EN_BLE,
-		EN_UWB,
-		EN_NOT_USE,
-		EN_SIG_DEFAULT
-} APP_SIGNAL;
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

@@ -1,0 +1,7 @@
+# Keil build output: keep only the .hex file
+04_SourceCode/PKM_JIG/MDK-ARM/PKM_JIG/*
+!04_SourceCode/PKM_JIG/MDK-ARM/PKM_JIG/PKM_JIG.hex
+04_SourceCode/PKM_JIG/MDK-ARM/*.lst
+
+# Python
+__pycache__/

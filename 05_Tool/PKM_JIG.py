@@ -6,6 +6,7 @@ import tkinter.messagebox as messagebox
 
 connected = False
 ser = None
+rx_buffer = b''
 
 def refresh_ports():
     port_options = []
@@ -52,8 +53,28 @@ def f_Not_Use_selected():
     if connected:
         ser.write(b'7')
 
+# Read "V:12.34,I:1.23\r\n" frames from JIG and update tracking labels
+def poll_tracking():
+    global rx_buffer
+    if not connected:
+        return
+    try:
+        if ser.in_waiting:
+            rx_buffer += ser.read(ser.in_waiting)
+    except serial.SerialException:
+        return
+    while b'\n' in rx_buffer:
+        line, rx_buffer = rx_buffer.split(b'\n', 1)
+        try:
+            fields = dict(item.split(':') for item in line.decode().strip().split(','))
+            voltage_var.set(fields['V'] + " V")
+            current_var.set(fields['I'] + " A")
+        except (ValueError, KeyError, UnicodeDecodeError):
+            pass
+    root.after(100, poll_tracking)
+
 def connect():
-    global connected, ser
+    global connected, ser, rx_buffer
     if not connected:
         port = port_dropdown.get()
         ser = serial.Serial(port)
@@ -61,8 +82,11 @@ def connect():
             connected = True
             connect_button.config(text="Disconnect")
             messagebox.showinfo("Connect", "Connected successfully!")
+            ser.reset_input_buffer()
+            rx_buffer = b''
             ser.write(b'c')
             toggle_options()
+            poll_tracking()
         else:
             messagebox.showerror("Connect", "Connection failed!")
     else:
@@ -73,6 +97,8 @@ def connect():
         ser.close()
         option_var.set(None)
         option_var2.set(None)
+        voltage_var.set("--")
+        current_var.set("--")
         toggle_options()
 
 
@@ -119,6 +145,17 @@ option_radio2_3 = ttk.Radiobutton(option_frame2, text="UWB", variable=option_var
 option_radio2_3.grid(row=2, column=0, padx=10, pady=5, sticky="w")
 option_radio2_4 = ttk.Radiobutton(option_frame2, text="Not use", variable=option_var2, value="Not use", state="disabled", command = f_Not_Use_selected)
 option_radio2_4.grid(row=3, column=0, padx=10, pady=5, sticky="w")
+
+tracking_frame = ttk.LabelFrame(root, text="Status")
+tracking_frame.grid(row=0, column=4, padx=10, pady=10, sticky="nsew")
+
+voltage_var = tk.StringVar(value="--")
+current_var = tk.StringVar(value="--")
+
+ttk.Label(tracking_frame, text="Voltage:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+ttk.Label(tracking_frame, textvariable=voltage_var, width=8).grid(row=0, column=1, padx=10, pady=5, sticky="w")
+ttk.Label(tracking_frame, text="Current:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+ttk.Label(tracking_frame, textvariable=current_var, width=8).grid(row=1, column=1, padx=10, pady=5, sticky="w")
 
 def on_close():
     if connected == True:

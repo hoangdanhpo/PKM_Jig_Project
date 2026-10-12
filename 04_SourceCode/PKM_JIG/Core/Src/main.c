@@ -108,7 +108,9 @@ void f_active_UWB(void);
 void f_sw_signal_not_use(void);
 uint8_t f_display_app(void);
 static uint16_t f_read_adc_ch(uint32_t channel);
-void f_update_adc_display(void);
+static void f_read_vol_cur(uint32_t *vbat_h, uint32_t *i_h);
+void f_update_adc_display(uint32_t vbat_h, uint32_t i_h);
+void f_send_adc_app(uint32_t vbat_h, uint32_t i_h);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -255,8 +257,10 @@ int main(void)
             static uint32_t u4l_last_adc_tick = 0U;
             if ((HAL_GetTick() - u4l_last_adc_tick) >= ADC_UPDATE_PERIOD_MS)
             {
+              uint32_t u4l_vbat_h, u4l_i_h;
               u4l_last_adc_tick = HAL_GetTick();
-              f_update_adc_display();
+              f_read_vol_cur(&u4l_vbat_h, &u4l_i_h);
+              f_update_adc_display(u4l_vbat_h, u4l_i_h);
             }
           }
           /* Select voltage by BTN3 */
@@ -455,6 +459,18 @@ int main(void)
           default:
             /*do nothing */
             break;
+        }
+
+        /* Send voltage and current to App every ADC_UPDATE_PERIOD_MS */
+        {
+          static uint32_t u4l_last_app_tick = 0U;
+          if ((HAL_GetTick() - u4l_last_app_tick) >= ADC_UPDATE_PERIOD_MS)
+          {
+            uint32_t u4l_vbat_h, u4l_i_h;
+            u4l_last_app_tick = HAL_GetTick();
+            f_read_vol_cur(&u4l_vbat_h, &u4l_i_h);
+            f_send_adc_app(u4l_vbat_h, u4l_i_h);
+          }
         }
       }
     }
@@ -792,20 +808,34 @@ static uint16_t f_read_adc_ch(uint32_t channel)
 }
 
 /**
- * @brief  Read VIN_MCU (CH0) and IIN_MCU (CH1), convert to real values
- *         and update row 3 of LCD: "Vol: XXV  Cur: X.XA"
+ * @brief  Read VIN_MCU (CH0) and IIN_MCU (CH1) and convert to real values.
+ *         Outputs are in hundredths: vbat_h = 1234 -> 12.34V, i_h = 123 -> 1.23A
  *
- * Voltage: VBAT = VIN_MCU × (R55+R58)/R58 = VIN_MCU × 11
+ * Voltage: VBAT = VIN_MCU x (R55+R58)/R58 = VIN_MCU x 11
  * Current: I = (Vout - 2500mV) / 185mV  (ACS712 5A)
  */
-void f_update_adc_display(void)
+static void f_read_vol_cur(uint32_t *vbat_h, uint32_t *i_h)
+{
+    /* --- Voltage --- */
+    uint16_t adc_vin = f_read_adc_ch(ADC_CHANNEL_0);
+    *vbat_h = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 10U;
+
+    /* --- Current (ACS712) --- */
+    uint16_t adc_iin = f_read_adc_ch(ADC_CHANNEL_1);
+    int32_t  vout_mv = (int32_t)((uint32_t)adc_iin * ADC_VREF_MV / ADC_RESOLUTION);
+    int32_t  i_ma    = (vout_mv - ACS712_OFFSET_MV) * 1000L / ACS712_SENSITIVITY;
+    if (i_ma < 0) { i_ma = 0; }
+    *i_h = (uint32_t)i_ma / 10U;
+}
+
+/**
+ * @brief  Update row 3 of LCD: "Vol: XX.XXV  Cur: X.XXA"
+ */
+void f_update_adc_display(uint32_t vbat_h, uint32_t i_h)
 {
     char buf[8];
 
     /* --- Voltage --- */
-    uint16_t adc_vin = f_read_adc_ch(ADC_CHANNEL_0);
-    /* VBAT in hundredths of volt: e.g. 2112 → "21.12V" */
-    uint32_t vbat_h = (uint32_t)adc_vin * ADC_VREF_MV * VBAT_DIVIDER_RATIO / ADC_RESOLUTION / 10U;
     uint8_t vbat_int = (uint8_t)(vbat_h / 100U);
     uint8_t vbat_d1  = (uint8_t)((vbat_h % 100U) / 10U);
     uint8_t vbat_d2  = (uint8_t)(vbat_h % 10U);
@@ -821,14 +851,7 @@ void f_update_adc_display(void)
     CLCD_SetCursor(&LCD1, 4, 3);
     CLCD_WriteString(&LCD1, buf);
 
-    /* --- Current (ACS712) --- */
-    uint16_t adc_iin = f_read_adc_ch(ADC_CHANNEL_1);
-    int32_t  vout_mv = (int32_t)((uint32_t)adc_iin * ADC_VREF_MV / ADC_RESOLUTION);
-    int32_t  i_ma    = (vout_mv - ACS712_OFFSET_MV) * 1000L / ACS712_SENSITIVITY;
-    if (i_ma < 0) { i_ma = 0; }
-
-    /* Current in hundredths of Ampere: e.g. 123 → "1.23A" */
-    uint32_t i_h    = (uint32_t)i_ma / 10U;
+    /* --- Current --- */
     uint8_t  i_int  = (uint8_t)(i_h / 100U);
     uint8_t  i_d1   = (uint8_t)((i_h % 100U) / 10U);
     uint8_t  i_d2   = (uint8_t)(i_h % 10U);
@@ -842,6 +865,26 @@ void f_update_adc_display(void)
     buf[5] = '\0';
     CLCD_SetCursor(&LCD1, 15, 3);
     CLCD_WriteString(&LCD1, buf);
+}
+
+/**
+ * @brief  Send voltage and current to App over USB CDC.
+ *         Frame format: "V:12.34,I:1.23\r\n"
+ */
+void f_send_adc_app(uint32_t vbat_h, uint32_t i_h)
+{
+    /* Static: USB transmits asynchronously from this buffer */
+    static char tx_buf[32];
+    int len;
+
+    len = snprintf(tx_buf, sizeof(tx_buf), "V:%lu.%02lu,I:%lu.%02lu\r\n",
+                   (unsigned long)(vbat_h / 100U), (unsigned long)(vbat_h % 100U),
+                   (unsigned long)(i_h / 100U), (unsigned long)(i_h % 100U));
+    if (len > 0)
+    {
+        /* Skip this frame if USB is busy, next period will send again */
+        (void)CDC_Transmit_FS((uint8_t *)tx_buf, (uint16_t)len);
+    }
 }
 
 /* USER CODE END 4 */
